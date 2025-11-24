@@ -1,0 +1,1246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>N.E.X.U.S - Local Edge AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+    <!-- 只保留 ONNX Runtime & VAD -->
+    <script src="./libs/ort.js"></script>
+    <script>
+    if (window.ort && ort.env && ort.env.wasm) {
+        ort.env.wasm.wasmPaths = {
+            "ort-wasm.wasm": "./libs/ort-wasm.wasm",
+            "ort-wasm-simd.wasm": "./libs/ort-wasm-simd.wasm",
+            "ort-wasm-threaded.wasm": "./libs/ort-wasm-threaded.wasm",
+            "ort-wasm-simd-threaded.wasm": "./libs/ort-wasm-simd-threaded.wasm"
+        };
+
+        // 禁用多线程（避免 SharedArrayBuffer 限制）
+        ort.env.wasm.numThreads = 1;
+    }
+    </script>
+    <script src="./libs/vad-web.bundle.min.js"></script>
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300;400;500&display=swap');
+        body {
+            background-color: #0f172a;
+            background-image:
+                radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%),
+                radial-gradient(at 50% 0%, hsla(225,39%,30%,1) 0, transparent 50%);
+            font-family: 'Roboto', sans-serif;
+            color: #e2e8f0;
+            overflow: hidden;
+        }
+        .font-tech { font-family: 'Orbitron', sans-serif; }
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 20px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+        .msg-user {
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+            border-radius: 18px 18px 4px 18px;
+        }
+        .msg-ai {
+            background: rgba(30, 41, 59, 0.8);
+            border-radius: 18px 18px 18px 4px;
+            border: 1px solid rgba(255,255,255,0.05);
+            position: relative;
+        }
+        .msg-ai::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+            background: #10b981;
+            opacity: 0.8;
+        }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-thumb {
+            background: #334155;
+            border-radius: 3px;
+        }
+        .state-ring { transition: all 0.5s; border: 2px solid rgba(255,255,255,0.1); }
+        .mode-idle { border-color: #64748b; }
+        .mode-listen {
+            border-color: #10b981;
+            box-shadow: 0 0 25px rgba(16, 185, 129, 0.6);
+            animation: pulse-green 1.5s infinite;
+        }
+        @keyframes pulse-green {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+        .markdown-body p { margin-bottom: 0.5em; }
+    </style>
+</head>
+<body class="h-screen w-screen flex items-center justify-center p-2 md:p-6">
+
+<div class="glass-panel w-full max-w-6xl h-[95vh] rounded-3xl flex flex-row overflow-hidden relative">
+    <!-- 左侧栏 -->
+    <div class="w-80 border-r border-slate-700/30 flex flex-col bg-slate-900/40 hidden md:flex backdrop-blur-sm z-10">
+        <div class="p-8 border-b border-slate-700/30">
+            <h1 class="font-tech text-xl text-white font-bold">N.E.X.U.S</h1>
+            <p class="text-[10px] text-green-400 tracking-widest uppercase">Local Models Edition</p>
+        </div>
+        <div class="p-6 flex-1 space-y-6 overflow-y-auto">
+            <div class="space-y-2">
+                <label class="text-[10px] uppercase text-slate-400 font-bold">Backend WebSocket URL</label>
+                <input
+                    type="text"
+                    id="ws-url"
+                    value="ws://192.168.110.131:8044/ws"
+                    class="w-full bg-slate-800/80 border border-slate-600 rounded-lg px-3 py-2 text-xs text-white font-mono outline-none"
+                >
+            </div>
+            <div class="space-y-2">
+                <label class="text-[10px] uppercase text-slate-400 font-bold">Picovoice Key (已不用，可留空)</label>
+                <input
+                    type="password"
+                    id="pv-key"
+                    placeholder="已弃用，可留空"
+                    class="w-full bg-slate-800/80 border border-slate-600 rounded-lg px-3 py-2 text-xs text-white outline-none"
+                >
+            </div>
+            <button
+                onclick="startSystem()"
+                id="btn-init"
+                class="w-full bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-3 rounded-lg transition shadow-lg mt-4"
+            >
+                LOAD LOCAL MODELS
+            </button>
+            
+            <!-- 独立字幕开关 -->
+            <button
+                onclick="toggleSubtitle()"
+                id="btn-subtitle"
+                class="w-full bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold py-3 rounded-lg transition shadow-lg mt-2"
+            >
+                开启实时字幕
+            </button>
+
+            <div class="bg-slate-800/40 rounded-xl p-4 border border-slate-700/50 space-y-2 font-mono text-[10px]">
+                <div class="flex justify-between">
+                    <span class="text-slate-400">Backend</span>
+                    <span id="status-conn" class="text-red-400">OFFLINE</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-slate-400">Model: VAD</span>
+                    <span id="status-vad" class="text-slate-600">NOT LOADED</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-slate-400">Model: Wake</span>
+                    <span id="status-wake" class="text-slate-600">DISABLED</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 主界面 -->
+    <div class="flex-1 flex flex-col relative bg-slate-900/20 overflow-hidden">
+        <div class="h-16 border-b border-slate-700/30 flex items中心 px-6 backdrop-blur-md bg-slate-900/10 z-20">
+            <span class="font-tech text-blue-400 font-bold text-lg">N.E.X.U.S</span>
+            <div class="ml-auto flex items-center gap-3">
+                <div
+                    id="mode-badge"
+                    class="px-3 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-mono"
+                >
+                    IDLE
+                </div>
+            </div>
+        </div>
+        <div id="chat-container" class="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 scroll-smooth pb-32">
+            <div class="flex items-end gap-3">
+                <div class="w-8 h-8 rounded-lg bg-purple-600 flex items-center justify-center shrink-0">
+                    <i class="fas fa-robot text-white text-xs"></i>
+                </div>
+                <div class="msg-ai text-slate-200 px-5 py-4 max-w-[85%] text-sm">
+                    <p>系统已就绪。点击下方圆形按钮开始录音，VAD 会自动截断语音并发送到后端。</p>
+                </div>
+            </div>
+        </div>
+        <!-- 录音按钮 -->
+        <!-- 实时字幕窗口 -->
+        <div id="subtitle-container" class="absolute bottom-60 left-0 right-0 flex justify-center z-40 pointer-events-none transition-opacity duration-300 opacity-0">
+             <div class="bg-slate-900/80 backdrop-blur-md border border-slate-700/50 text-slate-200 px-6 py-3 rounded-2xl text-lg font-medium shadow-2xl max-w-3xl text-center">
+                <span id="subtitle-text" class="font-sans"></span>
+            </div>
+        </div>
+
+        <!-- 音量显示条 -->
+        <div id="audio-visualizer"
+             style="position:absolute; bottom:180px; left:0; right:0; text-align:center;">
+            <canvas id="vu-canvas" width="300" height="40"
+                    style="margin:auto; display:block; opacity:0.8;"></canvas>
+        </div>
+        <div class="absolute bottom-8 left-0 right-0 flex flex-col items-center justify-center z-30">
+            <!-- 图片预览区域 -->
+            <div id="image-preview" class="flex gap-2 mb-4 overflow-x-auto max-w-lg px-4 transition-all empty:h-0"></div>
+
+            <div class="flex items-center gap-4 md:gap-8 w-full justify-center px-4 relative">
+                <!-- 图片上传按钮 -->
+                <button 
+                    onclick="document.getElementById('file-input').click()"
+                    class="w-12 h-12 rounded-full bg-slate-800/80 backdrop-blur-md border border-slate-600 text-slate-400 hover:text-blue-400 hover:border-blue-400 transition flex items-center justify-center shadow-lg group shrink-0"
+                    title="上传图片 (支持多张)"
+                >
+                    <i class="fas fa-image text-lg group-hover:scale-110 transition-transform"></i>
+                </button>
+
+                <!-- 中间动态区域：录音球 OR 文本输入框 -->
+                <div id="input-area" class="relative flex items-center justify-center transition-all duration-300">
+                    
+                    <!-- 语音模式：录音球 -->
+                    <div
+                        id="core-orb"
+                        class="w-24 h-24 rounded-full bg-slate-800/90 backdrop-blur-xl flex items-center justify-center state-ring mode-idle transition-all duration-300 cursor-pointer shadow-2xl hover:shadow-blue-900/20"
+                    >
+                        <i id="core-icon" class="fas fa-microphone text-3xl text-slate-500 transition-colors"></i>
+                    </div>
+
+                    <!-- 文本模式：输入框 (默认隐藏) -->
+                    <div id="text-input-box" class="hidden flex items-center gap-2 w-[280px] md:w-[500px] bg-slate-800/90 backdrop-blur-xl rounded-2xl p-2 border border-slate-600 shadow-2xl">
+                        <input 
+                            type="text" 
+                            id="msg-input" 
+                            class="flex-1 bg-transparent border-none outline-none text-slate-200 px-3 py-2 font-mono text-sm placeholder-slate-500"
+                            placeholder="输入消息..."
+                            onkeydown="if(event.key === 'Enter') sendTextMessage()"
+                        >
+                        <button 
+                            onclick="sendTextMessage()"
+                            class="w-10 h-10 rounded-xl bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center transition shadow-lg"
+                        >
+                            <i class="fas fa-paper-plane text-sm"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 切换模式按钮 -->
+                <button 
+                    onclick="toggleInputMode()"
+                    class="w-12 h-12 rounded-full bg-slate-800/80 backdrop-blur-md border border-slate-600 text-slate-400 hover:text-blue-400 hover:border-blue-400 transition flex items-center justify-center shadow-lg group shrink-0"
+                    title="切换 语音/文本 模式"
+                >
+                    <i id="mode-icon" class="fas fa-keyboard text-lg group-hover:scale-110 transition-transform"></i>
+                </button>
+            </div>
+
+            <div
+                id="core-text"
+                class="mt-4 text-xs text-slate-400 font-mono bg-slate-900/80 px-4 py-1 rounded-full border border-slate-700/50 transition-opacity"
+            >
+                Models Unloaded
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 隐藏的文件输入 -->
+<input type="file" id="file-input" class="hidden" multiple accept="image/*" onchange="handleImageUpload(this)">
+
+<script>
+    // 放在 <script> 里最上面，其他变量之前
+    const PATHS = {
+        vadWorklet: './models/silero_worklet.js',  // 你的 worklet 文件
+    };
+
+    // 简单起见，这里不再手动设置 ort.env，交给 vad-web 内部处理
+    let ws = null;
+    let vadInstance = null;
+    let isRecording = false;
+    const sessionId = "local_" + Date.now();
+
+    // ======== 最大录音时间限制 ========
+    const MAX_RECORDING_SECONDS = 5;  // 最大录音时长（秒）
+    let recordingTimer = null;
+    let collectedAudioChunks = [];     // 收集音频片段
+    let audioRecorder = null;          // MediaRecorder 实例
+    let recordedBlobs = [];            // 录制的音频 Blob
+
+    // ======== 音频播放控制（支持打断）========
+    let currentAudio = null;           // 当前正在播放的音频
+    let isPlaying = false;             // 是否正在播放
+
+    // ======== 多模态图片处理 ========
+    let selectedImages = [];           // 存储 Base64 图片数据
+
+    async function handleImageUpload(input) {
+        const files = input.files;
+        if (!files.length) return;
+
+        // 限制最大图片数量
+        if (selectedImages.length + files.length > 5) {
+            alert("最多只能上传 5 张图片");
+            input.value = '';
+            return;
+        }
+
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            // 简单限制大小 (例如 5MB)
+            if (file.size > 5 * 1024 * 1024) {
+                alert(`图片 ${file.name} 太大，请上传小于 5MB 的图片`);
+                continue;
+            }
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                // e.target.result 是 data:image/jpeg;base64,...
+                selectedImages.push(e.target.result);
+                updateImagePreview();
+            };
+            reader.readAsDataURL(file);
+        }
+        input.value = ''; // 重置输入框，允许重复选择同一文件
+    }
+
+    function updateImagePreview() {
+        const container = document.getElementById('image-preview');
+        container.innerHTML = '';
+        
+        selectedImages.forEach((imgSrc, index) => {
+            const div = document.createElement('div');
+            div.className = 'relative w-16 h-16 rounded-lg overflow-hidden border border-slate-600 group shrink-0 bg-slate-800';
+            div.innerHTML = `
+                <img src="${imgSrc}" class="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition">
+                <button onclick="removeImage(${index})" class="absolute top-0 right-0 bg-red-500/90 text-white w-5 h-5 flex items-center justify-center text-[10px] opacity-0 group-hover:opacity-100 transition rounded-bl-lg cursor-pointer hover:bg-red-600">
+                    <i class="fas fa-times"></i>
+                </button>
+            `;
+            container.appendChild(div);
+        });
+    }
+
+    // ======== 文本/语音模式切换 ========
+    let inputMode = 'voice'; // 'voice' or 'text'
+
+    // ======== 流式打字机效果 ========
+    let currentAiMsgDiv = null;
+    let currentAiMsgContent = null;
+    let typeQueue = [];
+    let isTyping = false;
+    let fullStreamedText = "";
+
+    function startNewAiMessage() {
+        currentAiMsgDiv = document.createElement('div');
+        currentAiMsgDiv.className = "flex items-end gap-3";
+        currentAiMsgDiv.innerHTML = `
+            <div class="w-8 h-8 rounded-lg bg-purple-600 flex items-center justify-center shrink-0">
+                <i class="fas fa-robot text-white text-xs"></i>
+            </div>
+            <div class="msg-ai text-slate-200 px-5 py-4 max-w-[85%] text-sm"></div>
+        `;
+        ui.chat.appendChild(currentAiMsgDiv);
+        currentAiMsgContent = currentAiMsgDiv.querySelector('.msg-ai');
+        ui.chat.scrollTop = ui.chat.scrollHeight;
+        fullStreamedText = ""; // 重置文本缓冲
+    }
+
+    function appendToTypeQueue(text) {
+        if (!currentAiMsgDiv) {
+            startNewAiMessage();
+        }
+        const chars = text.split('');
+        typeQueue.push(...chars);
+        if (!isTyping) {
+            processTypeQueue();
+        }
+    }
+
+    function processTypeQueue() {
+        if (typeQueue.length === 0) {
+            isTyping = false;
+            return;
+        }
+        isTyping = true;
+        const char = typeQueue.shift();
+        fullStreamedText += char;
+        // 使用 marked 解析 markdown，实时渲染
+        currentAiMsgContent.innerHTML = marked.parse(fullStreamedText);
+        ui.chat.scrollTop = ui.chat.scrollHeight;
+        
+        // 打字速度 (ms)
+        setTimeout(processTypeQueue, 30); 
+    }
+
+    function resetTypewriter() {
+        typeQueue = [];
+        isTyping = false;
+        currentAiMsgDiv = null;
+        currentAiMsgContent = null;
+        fullStreamedText = "";
+    }
+
+    function toggleInputMode() {
+        const orb = document.getElementById('core-orb');
+        const textBox = document.getElementById('text-input-box');
+        const icon = document.getElementById('mode-icon');
+        const statusText = document.getElementById('core-text');
+
+        if (inputMode === 'voice') {
+            // 切换到文本模式
+            inputMode = 'text';
+            orb.classList.add('hidden');
+            textBox.classList.remove('hidden');
+            icon.className = 'fas fa-microphone text-lg group-hover:scale-110 transition-transform'; // 按钮图标变为麦克风
+            statusText.classList.add('opacity-0'); // 隐藏状态文字
+            
+            // 自动聚焦输入框
+            setTimeout(() => document.getElementById('msg-input').focus(), 100);
+        } else {
+            // 切换到语音模式
+            inputMode = 'voice';
+            orb.classList.remove('hidden');
+            textBox.classList.add('hidden');
+            icon.className = 'fas fa-keyboard text-lg group-hover:scale-110 transition-transform'; // 按钮图标变为键盘
+            statusText.classList.remove('opacity-0');
+        }
+    }
+
+    function sendTextMessage() {
+        resetTypewriter();
+        const input = document.getElementById('msg-input');
+        const text = input.value.trim();
+        
+        if (!text && selectedImages.length === 0) return;
+
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            addSystemMessage("未连接后端");
+            return;
+        }
+
+        // 显示用户消息
+        if (text) {
+            addUserMessage(text);
+        }
+        if (selectedImages.length > 0) {
+            addSystemMessage(`[发送图片] ${selectedImages.length} 张`);
+        }
+
+        const payload = {
+            type: "text",
+            text: text
+        };
+        
+        if (selectedImages.length > 0) {
+            payload.images = selectedImages;
+        }
+
+        ws.send(JSON.stringify(payload));
+        
+        // 清空
+        input.value = '';
+        selectedImages = [];
+        updateImagePreview();
+    }
+
+    function addUserMessage(text) {
+        const div = document.createElement('div');
+        div.className = "flex items-end gap-3 justify-end";
+        div.innerHTML = `
+            <div class="msg-user text-white px-5 py-4 max-w-[85%] text-sm shadow-lg">${marked.parse(text)}</div>
+            <div class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shrink-0">
+                <i class="fas fa-user text-white text-xs"></i>
+            </div>
+        `;
+        ui.chat.appendChild(div);
+        ui.chat.scrollTop = ui.chat.scrollHeight;
+    }
+
+    // 暴露给全局以便 onclick 调用
+    window.removeImage = function(index) {
+        selectedImages.splice(index, 1);
+        updateImagePreview();
+    };
+    window.handleImageUpload = handleImageUpload;
+
+    const ui = {
+        btn: document.getElementById('btn-init'),
+        chat: document.getElementById('chat-container'),
+        statusConn: document.getElementById('status-conn'),
+        statusVad: document.getElementById('status-vad'),
+        statusWake: document.getElementById('status-wake'),
+        orb: document.getElementById('core-orb'),
+        icon: document.getElementById('core-icon'),
+        text: document.getElementById('core-text'),
+        badge: document.getElementById('mode-badge'),
+    };
+
+    // ======== 音频可视化（波形 + 音量条）=========
+    let audioContext = null;
+    let analyser = null;
+    let dataArray = null;
+    let visualizerRunning = false;
+
+    function initVisualizer() {
+        audioContext = new AudioContext();
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 512;   // 数值越大波形越细
+        const bufferLength = analyser.frequencyBinCount;
+        dataArray = new Uint8Array(bufferLength);
+    }
+
+    async function connectVisualizerToMic() {
+        if (visualizerRunning) {
+            if (audioContext && audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+            return;
+        }
+
+        if (!audioContext) {
+            initVisualizer();
+        } else if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const src = audioContext.createMediaStreamSource(stream);
+        src.connect(analyser);
+        visualizerRunning = true;
+        drawVisualizer();
+    }
+
+    function drawVisualizer() {
+        if (!visualizerRunning) return;
+
+        analyser.getByteTimeDomainData(dataArray);
+
+        const canvas = document.getElementById("vu-canvas");
+        const ctx = canvas.getContext("2d");
+
+        ctx.fillStyle = "#1e293b";   // 深色背景
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#22d3ee"; // 青色波形
+        ctx.beginPath();
+
+        const slice = canvas.width / dataArray.length;
+        let x = 0;
+
+        for (let i = 0; i < dataArray.length; i++) {
+            const v = dataArray[i] / 128.0;
+            const y = v * canvas.height / 2;
+
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+
+            x += slice;
+        }
+
+        ctx.lineTo(canvas.width, canvas.height / 2);
+        ctx.stroke();
+
+        requestAnimationFrame(drawVisualizer);
+    }
+
+    function updateStatus(mode) {
+        ui.orb.className =
+            "w-24 h-24 rounded-full bg-slate-800/90 backdrop-blur-xl flex items-center justify-center state-ring transition-all duration-300 cursor-pointer mode-" +
+            mode.toLowerCase();
+
+        if (mode === 'IDLE') {
+            ui.icon.className = "fas fa-microphone text-3xl text-slate-500";
+            ui.text.innerText = "Click to Record";
+            ui.badge.innerText = "IDLE";
+            ui.badge.className =
+                "px-3 py-1 rounded-full bg-slate-800 border border-slate-700 text-slate-400 text-xs font-mono";
+        } else if (mode === 'LISTEN') {
+            ui.icon.className = "fas fa-microphone-lines text-3xl text-green-400";
+            ui.text.innerText = "Listening...";
+            ui.badge.innerText = "RECORDING (VAD)";
+            ui.badge.className =
+                "px-3 py-1 rounded-full bg-green-900/30 border border-green-500/30 text-green-400 text-xs font-mono";
+        }
+    }
+
+    // ================= 启动系统：创建 MicVAD 实例 =================
+    window.startSystem = async function () {
+        const wsUrl = document.getElementById('ws-url').value;
+
+        ui.btn.innerText = "LOADING MODELS...";
+        ui.btn.disabled = true;
+
+        try {
+            connectWs(wsUrl);
+
+            ui.statusVad.innerText = "INIT VAD...";
+
+            // 关键：使用 vad-web 自带模型 & worklet，不再手动传 model / workletURL
+            vadInstance = await vad.MicVAD.new({
+                workletURL: PATHS.vadWorklet,
+
+                // ⭐ 保持启动灵敏，同时确保静音时能退出
+                positiveSpeechThreshold: 0.4,      // 略低于默认值，仍能快速进入语音
+                negativeSpeechThreshold: 0.35,     // 提高阈值，更容易检测到静音结束
+
+                // ⭐ 改善"语音结束识别"的两个关键参数
+                redemptionFrames: 8,               // 减少帧数，更快检测到语音结束
+                minSpeechFrames: 2,                // 默认 3，降低可让短语音也能触发
+
+                // Debug
+                onSpeechStart: () => {
+                    console.log("VAD: Speech Start");
+                    ui.badge.innerText = "VOICE DETECTED";
+                },
+                onSpeechEnd: (audio) => {
+                    console.log("VAD: Speech End, audio length:", audio.length);
+                    if (!isRecording) return;
+
+                    // 收集音频片段
+                    collectedAudioChunks.push(audio);
+                },
+                onFrameProcessed: (probs) => {
+                    // 可选：显示实时概率，用于调试
+                    // console.log("VAD prob:", probs.isSpeech);
+                },
+            });
+
+
+
+            console.log("MicVAD ready:", vadInstance);
+
+            // 默认先暂停，只有点按钮才开始
+            vadInstance.pause();
+            ui.statusVad.innerText = "LOCAL READY";
+            ui.statusVad.className = "text-green-400";
+            ui.statusWake.innerText = "DISABLED";
+            ui.statusWake.className = "text-slate-500";
+
+            updateStatus('IDLE');
+            ui.text.innerText = "Click to Record";
+            ui.btn.innerText = "MODELS READY";
+            addSystemMessage("本地 VAD 模型加载完成，点击下方按钮开始录音。");
+
+        } catch (e) {
+            console.error("Init error:", e);
+            alert("加载失败: " + (e.message || e) + "\n请按 F12 查看控制台");
+            ui.btn.disabled = false;
+            ui.btn.innerText = "RETRY LOAD";
+        }
+    };
+
+    // ================= 实时字幕逻辑 =================
+    let subtitleWs = null;
+    let subtitleContext = null;
+    let subtitleSource = null;
+    let subtitleProcessor = null;
+    let subtitleStream = null; // 独立流
+    let subtitleLastSpeechTs = 0;
+    let subtitleSilenceCommitted = false;
+    let subtitleHasSpoken = false;
+    let subtitleCommittedText = ""; // 已确认（final）的文本
+    let subtitleLiveText = "";      // 仍在变化的增量文本
+    const SUBTITLE_SILENCE_THRESHOLD = 0.005;     // PCM 振幅阈值 (更敏感)
+    const SUBTITLE_SILENCE_COMMIT_MS = 300;       // 静音超过 300ms 认为一句结束，促使更快出 final
+
+    async function toggleSubtitle() {
+        const btn = document.getElementById('btn-subtitle');
+        
+        if (subtitleWs && subtitleWs.readyState === WebSocket.OPEN) {
+            // 关闭
+            stopSubtitleSession();
+            btn.innerText = "开启实时字幕";
+            btn.classList.remove('bg-red-600', 'hover:bg-red-500');
+            btn.classList.add('bg-slate-700', 'hover:bg-slate-600');
+        } else {
+            // 开启
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: 16000,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+                subtitleStream = stream; // 保存引用以便关闭
+                await startSubtitleSession(stream);
+                
+                btn.innerText = "停止实时字幕";
+                btn.classList.remove('bg-slate-700', 'hover:bg-slate-600');
+                btn.classList.add('bg-red-600', 'hover:bg-red-500');
+            } catch (e) {
+                console.error("无法启动字幕麦克风", e);
+                alert("无法启动麦克风: " + e.message);
+            }
+        }
+    }
+
+    async function startSubtitleSession(stream) {
+        let baseUrl = document.getElementById('ws-url').value;
+        // 移除末尾的 /ws 或 /
+        baseUrl = baseUrl.replace(/\/ws\/?$/, '').replace(/\/$/, '');
+        
+        // 构造字幕 WebSocket URL: 始终使用 /ws/subtitles
+        let subtitleUrl = `${baseUrl}/ws/subtitles`;
+
+        // 尝试使用 16k 采样率
+        try {
+            subtitleContext = new AudioContext({ sampleRate: 16000 });
+        } catch (e) {
+            console.warn("16k AudioContext not supported, using default");
+            subtitleContext = new AudioContext();
+        }
+        const sampleRate = subtitleContext.sampleRate;
+
+        subtitleUrl += `?format=pcm&sample_rate=${sampleRate}&enable_vad=true`;
+        console.log("Connecting to Subtitle WS:", subtitleUrl);
+
+        subtitleWs = new WebSocket(subtitleUrl);
+        subtitleLastSpeechTs = performance.now();
+        subtitleSilenceCommitted = false;
+        subtitleHasSpoken = false;
+        subtitleCommittedText = "";
+        subtitleLiveText = "";
+
+        subtitleWs.onopen = () => {
+            console.log("Subtitle WS connected");
+            document.getElementById('subtitle-container').classList.remove('opacity-0');
+        };
+
+        subtitleWs.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                const subEl = document.getElementById('subtitle-text');
+                if (data.type === 'subtitle_delta') {
+                    const text = data.text || '';
+                    subtitleLiveText += text; // 增量追加到临时文本
+                    subEl.innerText = subtitleCommittedText + subtitleLiveText;
+                    subEl.style.opacity = '0.8';
+                } else if (data.type === 'subtitle') {
+                    const text = data.text || '';
+                    const isFinal = data.is_final;
+                    // 整句覆盖：final 时更新稳定文本并清空临时文本
+                    if (isFinal) {
+                        subtitleCommittedText = text;
+                        subtitleLiveText = "";
+                    } else {
+                        subtitleCommittedText = text;
+                        subtitleLiveText = "";
+                    }
+                    subEl.innerText = subtitleCommittedText;
+                    
+                    if (isFinal) {
+                        subtitleSilenceCommitted = false;
+                        subEl.style.opacity = '1';
+                    } else {
+                        subEl.style.opacity = '0.8';
+                    }
+                }
+            } catch (e) {
+                console.error("Subtitle parse error:", e);
+            }
+        };
+
+        subtitleWs.onerror = (e) => console.error("Subtitle WS error:", e);
+
+        // 音频处理
+        subtitleSource = subtitleContext.createMediaStreamSource(stream);
+        // bufferSize 2048 (约128ms延迟), 1 input channel, 1 output channel
+        subtitleProcessor = subtitleContext.createScriptProcessor(2048, 1, 1);
+
+        subtitleProcessor.onaudioprocess = (e) => {
+            if (!subtitleWs || subtitleWs.readyState !== WebSocket.OPEN) return;
+
+            const inputData = e.inputBuffer.getChannelData(0);
+            const hasSpeech = detectSpeech(inputData, SUBTITLE_SILENCE_THRESHOLD);
+            if (hasSpeech) {
+                subtitleLastSpeechTs = performance.now();
+                subtitleSilenceCommitted = false;
+                subtitleHasSpoken = true;
+            }
+
+            // 转换为 PCM
+            const pcmData = floatTo16BitPCM(inputData);
+            const base64 = arrayBufferToBase64(pcmData.buffer);
+
+            subtitleWs.send(JSON.stringify({
+                type: 'audio',
+                data: base64
+            }));
+
+            // 如果检测到静音达到阈值，就发送一次 commit，促使后端尽快输出最终字幕
+            if (!hasSpeech) {
+                const now = performance.now();
+                if (subtitleHasSpoken && !subtitleSilenceCommitted && (now - subtitleLastSpeechTs) > SUBTITLE_SILENCE_COMMIT_MS) {
+                    subtitleWs.send(JSON.stringify({ type: 'commit' }));
+                    subtitleSilenceCommitted = true;
+                    subtitleHasSpoken = false;
+                }
+            }
+        };
+
+        subtitleSource.connect(subtitleProcessor);
+        subtitleProcessor.connect(subtitleContext.destination);
+    }
+
+    function stopSubtitleSession() {
+        if (subtitleProcessor) {
+            subtitleProcessor.disconnect();
+            subtitleProcessor = null;
+        }
+        if (subtitleSource) {
+            subtitleSource.disconnect();
+            subtitleSource = null;
+        }
+        if (subtitleContext) {
+            subtitleContext.close();
+            subtitleContext = null;
+        }
+        if (subtitleWs) {
+            // 发送结束信号
+            if (subtitleWs.readyState === WebSocket.OPEN) {
+                subtitleWs.send(JSON.stringify({ type: 'commit' }));
+                subtitleWs.close();
+            }
+            subtitleWs = null;
+        }
+        subtitleLastSpeechTs = 0;
+        subtitleSilenceCommitted = false;
+        subtitleHasSpoken = false;
+        subtitleCommittedText = "";
+        subtitleLiveText = "";
+        
+        // 关闭流
+        if (subtitleStream) {
+            subtitleStream.getTracks().forEach(track => track.stop());
+            subtitleStream = null;
+        }
+
+        document.getElementById('subtitle-container').classList.add('opacity-0');
+        setTimeout(() => {
+             document.getElementById('subtitle-text').innerText = '';
+        }, 300);
+    }
+
+    function detectSpeech(float32Array, threshold) {
+        for (let i = 0; i < float32Array.length; i++) {
+            if (Math.abs(float32Array[i]) > threshold) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ================= 录音控制：按钮触发 =================
+    async function startRecording() {
+        resetTypewriter();
+        if (!vadInstance) {
+            addSystemMessage("VAD 模型尚未加载，请先点击左侧按钮加载模型。");
+            return;
+        }
+
+        await connectVisualizerToMic();
+        if (isRecording) return;
+        isRecording = true;
+        collectedAudioChunks = [];
+        recordedBlobs = [];
+
+        try {
+            // 启动 VAD（用于可视化效果，但不依赖它来收集音频）
+            await vadInstance.start();
+
+            // ⭐ 使用 MediaRecorder 直接录制所有音频 ⭐
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    channelCount: 1,
+                    sampleRate: 16000,
+                    echoCancellation: true,
+                    noiseSuppression: true
+                }
+            });
+
+            audioRecorder = new MediaRecorder(stream, {
+                mimeType: 'audio/webm;codecs=opus'
+            });
+
+            audioRecorder.ondataavailable = (event) => {
+                if (event.data && event.data.size > 0) {
+                    recordedBlobs.push(event.data);
+                    console.log("Recorded chunk:", event.data.size, "bytes");
+                }
+            };
+
+            audioRecorder.onstop = () => {
+                console.log("MediaRecorder stopped, total chunks:", recordedBlobs.length);
+                processRecordedAudio();
+            };
+
+            audioRecorder.start(100); // 每 100ms 收集一次数据
+
+            updateStatus('LISTEN');
+            addSystemMessage(`开始录音，请说话...（最长 ${MAX_RECORDING_SECONDS} 秒）`);
+
+            // ⭐ 设置最大录音时间定时器 ⭐
+            recordingTimer = setTimeout(() => {
+                console.log("Recording timeout reached, auto-sending...");
+                autoSendAndStop();
+            }, MAX_RECORDING_SECONDS * 1000);
+
+        } catch (e) {
+            console.error("startRecording error:", e);
+            addSystemMessage("启动录音失败，请检查麦克风权限。");
+            isRecording = false;
+            updateStatus('IDLE');
+        }
+    }
+
+    // ⭐ 超时或手动停止时，停止录制器 ⭐
+    function autoSendAndStop() {
+        if (!isRecording) return;
+
+        // 清除定时器
+        if (recordingTimer) {
+            clearTimeout(recordingTimer);
+            recordingTimer = null;
+        }
+
+        // 停止 MediaRecorder，会触发 onstop 回调
+        if (audioRecorder && audioRecorder.state !== 'inactive') {
+            audioRecorder.stop();
+        } else {
+            stopRecording(false);
+        }
+    }
+
+    // ⭐ 处理录制完成的音频 ⭐
+    async function processRecordedAudio() {
+        if (recordedBlobs.length === 0) {
+            addSystemMessage("未检测到有效语音，请重试。");
+            stopRecording(false);
+            return;
+        }
+
+        // 合并所有 Blob
+        const audioBlob = new Blob(recordedBlobs, { type: 'audio/webm;codecs=opus' });
+        console.log("Total audio blob size:", audioBlob.size, "bytes");
+
+        // 转换为 WAV 格式
+        try {
+            const audioContext = new AudioContext({ sampleRate: 16000 });
+            const arrayBuffer = await audioBlob.arrayBuffer();
+            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+            // 获取单声道音频数据
+            const float32Data = audioBuffer.getChannelData(0);
+            console.log("Decoded audio samples:", float32Data.length);
+
+            // 发送到后端
+            sendAudioToBackend(float32Data);
+        } catch (e) {
+            console.error("Audio processing error:", e);
+            addSystemMessage("音频处理失败: " + e.message);
+        }
+
+        stopRecording(false);
+    }
+
+    function stopRecording(manual = true) {
+        if (!vadInstance) return;
+        if (!isRecording) return;
+
+        // 清除定时器
+        if (recordingTimer) {
+            clearTimeout(recordingTimer);
+            recordingTimer = null;
+        }
+
+        isRecording = false;
+        vadInstance.pause();
+        updateStatus('IDLE');
+        visualizerRunning = false;
+        if (audioContext && audioContext.state === 'running') {
+            audioContext.suspend().catch((err) => console.warn('AudioContext suspend error:', err));
+        }
+
+        // 停止 MediaRecorder
+        if (audioRecorder && audioRecorder.state !== 'inactive') {
+            audioRecorder.stop();
+            // 停止所有音轨
+            audioRecorder.stream.getTracks().forEach(track => track.stop());
+        }
+
+        // 如果是手动停止且有录制数据，会在 processRecordedAudio 中处理
+        if (manual && !audioRecorder) {
+            addSystemMessage("已停止录音。");
+        }
+    }
+
+    // 点击中间圆圈：开始/停止录音
+    ui.orb.addEventListener('click', () => {
+        if (!vadInstance) {
+            addSystemMessage("请先点击左侧 [LOAD LOCAL MODELS] 加载模型。");
+            return;
+        }
+
+        // ⭐ 如果正在播放音频，先打断播放 ⭐
+        if (isPlaying) {
+            stopCurrentAudio();
+        }
+
+        if (isRecording) {
+            stopRecording(true);
+        } else {
+            startRecording();
+        }
+    });
+
+    // 可选：空格键触发录音
+    window.addEventListener('keydown', (e) => {
+        if (e.code === 'Space') {
+            e.preventDefault();
+            ui.orb.click();
+        }
+    });
+
+    // ================= WebSocket =================
+    function connectWs(url) {
+        try {
+            ws = new WebSocket(`${url}?session_id=${sessionId}`);
+            ws.onopen = () => {
+                ui.statusConn.innerText = "CONNECTED";
+                ui.statusConn.className = "text-green-400";
+            };
+            ws.onmessage = (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+
+                    switch (data.type) {
+                        case "asr_result":
+                            // 中间 ASR 结果（识别出的文字）
+                            addSystemMessage("ASR: " + data.text);
+                            break;
+
+                        case "text_preview":
+                            // 流式接收句子
+                            appendToTypeQueue(data.text);
+                            break;
+
+                        case "final_text":
+                        case "full_text":
+                            // 最终文本确认 (如果流式未触发，则直接显示)
+                            if (!currentAiMsgDiv) {
+                                addAiMessage(data.text);
+                            }
+                            break;
+
+                        case "audio_end":
+                            // 对话结束
+                            // 注意：不要在这里重置打字机，因为打字机队列可能还有未显示的文字
+                            // resetTypewriter();
+                            break;
+
+                        case "audio":
+                            // 后端返回的是 TTS 音频（base64）
+                            playAudioBase64(data.data);
+                            break;
+
+                        case "error":
+                            addSystemMessage("后端报错：" + data.error);
+                            break;
+
+                        default:
+                            console.warn("未知的 WS 消息类型：", data);
+                    }
+                } catch (err) {
+                    console.warn("WS parse error:", err);
+                }
+            };
+
+            ws.onclose = () => {
+                ui.statusConn.innerText = "OFFLINE";
+                ui.statusConn.className = "text-red-400";
+            };
+            ws.onerror = (err) => {
+                console.warn("WS Error", err);
+            };
+        } catch (err) {
+            console.error("WS Init Error", err);
+        }
+    }
+
+    // ================= 音频发送 & 工具函数 =================
+    function sendAudioToBackend(float32Audio) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            addSystemMessage("语音未发送 (后端未连接)");
+            return;
+        }
+
+        // 将 Float32 音频封装成 WAV 格式
+        const wavBuffer = createWavFile(float32Audio, 16000);
+        const base64Data = arrayBufferToBase64(wavBuffer);
+
+        // 构造 Payload
+        const payload = {
+            type: "audio",
+            data: base64Data
+        };
+
+        // 如果有图片，附加到请求中
+        if (selectedImages.length > 0) {
+            // 提取 base64 部分 (去掉 data:image/xxx;base64, 前缀)
+            // 后端 main.py 似乎直接接收 images 列表，具体格式取决于 LLM 服务
+            // 通常 DashScope/OpenAI 接受 data URI 或 URL。
+            // 这里直接发送完整 data URI，后端如果需要处理可以再处理。
+            // 假设后端直接透传给 LLM。
+            payload.images = selectedImages;
+            console.log(`Attaching ${selectedImages.length} images to request`);
+        }
+
+        // 发送格式与测试文件保持一致：只发送 type 和 data (以及 images)
+        ws.send(JSON.stringify(payload));
+
+        console.log(`Sent WAV audio: ${base64Data.length} chars (base64), ${wavBuffer.byteLength} bytes`);
+        
+        if (selectedImages.length > 0) {
+            addSystemMessage(`已发送音频 + ${selectedImages.length} 张图片，等待回复...`);
+            // 发送后清空图片
+            selectedImages = [];
+            updateImagePreview();
+        } else {
+            addSystemMessage("已发送音频（WAV 格式），等待 ASR...");
+        }
+    }
+
+    // ⭐ 创建 WAV 文件（完整的 WAV header + PCM 数据）⭐
+    function createWavFile(float32Array, sampleRate) {
+        const numChannels = 1;  // 单声道
+        const bitsPerSample = 16;
+        const bytesPerSample = bitsPerSample / 8;
+        const blockAlign = numChannels * bytesPerSample;
+
+        // 转换为 16-bit PCM
+        const pcmData = floatTo16BitPCM(float32Array);
+        const dataSize = pcmData.length;
+
+        // WAV 文件总大小 = 44 字节 header + PCM 数据
+        const buffer = new ArrayBuffer(44 + dataSize);
+        const view = new DataView(buffer);
+
+        // RIFF chunk descriptor
+        writeString(view, 0, 'RIFF');
+        view.setUint32(4, 36 + dataSize, true);  // 文件大小 - 8
+        writeString(view, 8, 'WAVE');
+
+        // fmt sub-chunk
+        writeString(view, 12, 'fmt ');
+        view.setUint32(16, 16, true);  // fmt chunk size
+        view.setUint16(20, 1, true);   // audio format (1 = PCM)
+        view.setUint16(22, numChannels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * blockAlign, true);  // byte rate
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, bitsPerSample, true);
+
+        // data sub-chunk
+        writeString(view, 36, 'data');
+        view.setUint32(40, dataSize, true);
+
+        // 写入 PCM 数据
+        const pcmView = new Uint8Array(buffer, 44);
+        pcmView.set(pcmData);
+
+        return buffer;
+    }
+
+    function writeString(view, offset, string) {
+        for (let i = 0; i < string.length; i++) {
+            view.setUint8(offset + i, string.charCodeAt(i));
+        }
+    }
+
+    function floatTo16BitPCM(float32Array) {
+        const buffer = new ArrayBuffer(float32Array.length * 2);
+        const view = new DataView(buffer);
+        for (let i = 0; i < float32Array.length; i++) {
+            let s = Math.max(-1, Math.min(1, float32Array[i]));
+            s = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            view.setInt16(i * 2, s, true);
+        }
+        return new Uint8Array(buffer);
+    }
+
+    function arrayBufferToBase64(buffer) {
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return window.btoa(binary);
+    }
+
+    function playAudioBase64(b64) {
+        const audioBytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+        const audioBlob = new Blob([audioBytes], { type: 'audio/wav' });
+        const audioUrl = URL.createObjectURL(audioBlob);
+
+        // 停止之前正在播放的音频
+        stopCurrentAudio();
+
+        currentAudio = new Audio(audioUrl);
+        isPlaying = true;
+
+        currentAudio.onended = () => {
+            isPlaying = false;
+            currentAudio = null;
+            console.log("Audio playback finished");
+        };
+
+        currentAudio.onerror = (e) => {
+            console.error("Audio playback error:", e);
+            isPlaying = false;
+            currentAudio = null;
+        };
+
+        currentAudio.play();
+    }
+
+    // ⭐ 停止当前正在播放的音频 ⭐
+    function stopCurrentAudio() {
+        if (currentAudio) {
+            currentAudio.pause();
+            currentAudio.currentTime = 0;
+            currentAudio = null;
+            isPlaying = false;
+            console.log("Audio playback interrupted");
+            addSystemMessage("已打断播放");
+        }
+    }
+
+    function addSystemMessage(text) {
+        const div = document.createElement('div');
+        div.className = "text-center text-[10px] text-slate-500 py-1";
+        div.innerText = text;
+        ui.chat.appendChild(div);
+        ui.chat.scrollTop = ui.chat.scrollHeight;
+    }
+
+    function addAiMessage(text) {
+        const div = document.createElement('div');
+        div.className = "flex items-end gap-3";
+        div.innerHTML = `
+            <div class="w-8 h-8 rounded-lg bg-purple-600 flex items-center justify-center shrink-0">
+                <i class="fas fa-robot text-white text-xs"></i>
+            </div>
+            <div class="msg-ai text-slate-200 px-5 py-4 max-w-[85%] text-sm">${marked.parse(text)}</div>
+        `;
+        ui.chat.appendChild(div);
+        ui.chat.scrollTop = ui.chat.scrollHeight;
+    }
+</script>
+</body>
+</html>
